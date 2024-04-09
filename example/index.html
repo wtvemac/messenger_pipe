@@ -1,0 +1,1365 @@
+<html>
+  <head>
+    <title>TicTacToe JavaScript</title>
+    <DISPLAY notvaudio allowoffline options hideoptions noscroll>
+    <!-- Original:      Maximilian Stocker (maxstocker@reallyusefulcomputing.com) -->
+    <!-- HackTV Update: Matt               (MattMan69@gmail.com)                  -->
+    <!-- Multiplayer:   {dFb}eMac/Eric     (ubergeek03@gmail.com)                 -->
+  </head>
+  <script language="JavaScript">
+    // Shows debug alerts when there's a major problem.
+    var msg_debug = 0;
+    
+    // Sets the server-side endpoint URL that we will send calls to.
+    var msg_endpoint = "http://localhost/wtv-message.php";
+    
+    // The wait in milliseconds (1000 milliseconds = 1 second) to check an endpoint call. This is used to see if an endpoint call has timed out.
+    var msg_check_interval_msecs = 1000;
+    
+    // The amount of checks before we declare a timeout and then retry. requestCheckIntervalMsecs * requestCheckTriesBeforeRetry = time to retry.
+    var check_tries_before_retry = 20; // * msg_check_interval_msecs = 20000ms or 20secs
+
+    // The wait between endpoint calls. This allows time for the box to relax between requests. Don't want to bog it down y'know.
+    var msg_spacing_msecs = 3000;
+
+    // Send session ID in request. Used for when you have cookie issues.
+    var msg_no_cookies = true;
+
+
+    function receiveMessage(name, value)
+    {
+      processMessage(name, value);
+    }
+
+    // Sets the default callback when no callback is specified in each endpoint call.
+    // CALLBACK(name, value) format
+    var msg_default_callback = receiveMessage;
+  </script>
+  <script language="JavaScript">
+    /*
+
+    What:
+      WebTV Client Message Broker (box-side)
+    By:
+      {dFb}eMac
+    Date:
+      July 9th 2023
+
+    About: 
+      This is a really basic messaging framework so two WebTV clients can talk to each other. This
+      allows the ability to create multiplayer games, private IM clients, remote control tools and the like.
+      Messages are sent to a simple server-side PHP script that receives messages, keeps state and stores 
+      messages to be consumed on the peer box.
+
+      Calls to the server-side script are sent asynchronously so a callback is called once the message is fully
+      recieved.
+
+      This script was essentially farted out in a day. Adjust your expextations. All code is unlicensed.
+      Use this code however you want! https://choosealicense.com/licenses/unlicense/
+
+      You should be able to copy this script, configure it and use the functions below to handle messages.
+      There's some shims for older boxes that don't support some array methods.
+      
+    */
+
+    /*
+      This is free and unencumbered software released into the public domain.
+
+      Anyone is free to copy, modify, publish, use, compile, sell, or
+      distribute this software, either in source code form or as a compiled
+      binary, for any purpose, commercial or non-commercial, and by any
+      means.
+
+      In jurisdictions that recognize copyright laws, the author or authors
+      of this software dedicate any and all copyright interest in the
+      software to the public domain. We make this dedication for the benefit
+      of the public at large and to the detriment of our heirs and
+      successors. We intend this dedication to be an overt act of
+      relinquishment in perpetuity of all present and future rights to this
+      software under copyright law.
+
+      THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+      EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+      MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+      IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+      OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+      ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+      OTHER DEALINGS IN THE SOFTWARE.
+
+      For more information, please refer to <https://unlicense.org>
+    */
+
+    // Shows debug alerts when there's a major problem.
+    var debug = (msg_debug) ? msg_debug : 0;
+
+    // Experimental but allows you to set an index to the message broker if you want to run more than one at a time.
+    // We use a hidden embed to send messages. This may or may not work?
+    var messengerIndex = (msg_index) ? msg_index : 1;
+
+    // Sets the server-side endpoint URL that we will send calls to.
+    var messengerActiveEndpoint = (msg_active_endpoint) ? msg_active_endpoint : "http://localhost/wtv-message.php";
+
+    // Sets the default callback when no callback is specified in each endpoint call.
+    var messengerDefaultCallback = (msg_default_callback) ? msg_default_callback : null;
+
+    // The wait in milliseconds (1000 milliseconds = 1 second) to check an endpoint call. This is used to see if an endpoint call has timed out.
+    var requestCheckIntervalMsecs = (msg_check_interval_msecs) ? msg_check_interval_msecs : 1000;
+
+    // The amount of checks before we declare a timeout and then retry. requestCheckIntervalMsecs * requestCheckTriesBeforeRetry = time to retry.
+    var requestCheckTriesBeforeRetry = (check_tries_before_retry) ? check_tries_before_retry : 20;
+
+    // The wait between endpoint calls. This allows time for the box to relax between requests. Don't want to bog it down y'know.
+    var requestSpacingMsecs = (msg_spacing_msecs) ? msg_spacing_msecs : 3000;
+
+    // Send session ID in request. Used for when you have cookie issues.
+    var requestNoCookies = (msg_no_cookies) ? msg_no_cookies : false;
+
+    /*
+
+    SetSessionName(name, callback, priority)
+      Gives the current session a name. This can be a player name.
+      If you want this to be called asap then set prioroty to true.
+
+    GetPeers(callback, priority)
+      Gets a list of peers. Sends all peers in an array to callback. Peers are sent in a NAME: SESSION_ID format.
+      Each session needs a name to appear in the list.
+      If no callback is set then the messengerDefaultCallback is called for each peer found. NAME=NAME VALUE=SESSION_ID
+
+    SetSessionCompanion(sessionId, callback, priority)
+      Sets the companion box to send messages to. You can find a list of boxes from GetPeers.
+      If you want this to be called asap then set prioroty to true.
+
+
+    SendMessage(name, value, callback, priority)
+      Sends a generic name/value message to the companion box.
+
+    Heartbeat(callback, priority)
+      Sends a heartbeat signal. This allows a box's session to not timeout. This is only needed if the server-side is configured with 
+        "$loose_heartbeat = false;"
+
+    Logout(callback, priority)
+      Deletes a session from the server-side and detaches from the companion box.
+
+
+    The callback is sent in a CALLBACK(messages) where messages is a name-value array with each message.
+    The default callback is sent in a CALLBACK(name, value) where each element of the array is sent individuallly.
+
+    */
+
+    /// ----------------------------------------------------------------------------------- ///
+    /// ----------------------------------------------------------------------------------- ///
+    /// ----------------------------------------------------------------------------------- ///
+    /// ----------------------------------------------------------------------------------- ///
+    /// ----------------------------------------------------------------------------------- ///
+    /// ----------------------------------------------------------------------------------- ///
+
+    var messageQueue = new Array();
+    var requestCheckIntervalObj = null;
+    var requestCheckIntervalEnabled = false;
+    var requestSpacingIntervaObj = null;
+    var requestSpacingIntervalEnabled = false;
+    var _debug = 0;
+    var checkIndex = 0;
+    var messenegrEmbedNamePrefix = "messengerForm";
+    var messenegrFormName = "messengerForm";
+    var currentCallback = null;
+    var requestCheckTries = 0;
+    var currentSessionid = "";
+
+    function silenceDbg()
+    {
+      _debug = debug;
+      debug = 0;
+    }
+
+    function resetDbg()
+    {
+      debug = _debug;
+    }
+
+    function dbg()
+    {
+      if(debug)
+      {
+        var message = "";
+
+        // work on 1.0 viewer?
+        for(var i = 0; i < arguments.length; i++)
+        {
+          if(message != "")
+          {
+            message += " ";
+          }
+
+          var _message = "";
+          if(arguments[i] == null)
+          {
+            _message = "!NULL!";
+          }
+          else if(arguments[i] == undefined)
+          {
+            _message = "!UNDEFINED!";
+          }
+          else
+          {
+            _message = arguments[i].toString();
+
+            if(_message == "[object Array]")
+            {
+              _message = "Array[0:" + arguments[i].length + "]";
+            }
+          }
+
+
+          message += _message;
+        }
+
+        alert("WTVMsnger:\n\n" + message);
+      }
+    }
+
+    function getMessenger(index)
+    {
+      if(!index)
+      {
+        if(!messengerIndex)
+        {
+          index = 1;
+        }
+        else
+        {
+          index = messengerIndex;
+        }
+      }
+
+      if(document[messenegrEmbedNamePrefix + index])
+      {
+        return document[messenegrEmbedNamePrefix + index];
+      }
+      else if(document.all[messenegrEmbedNamePrefix + index])
+      {
+        return document.all[messenegrEmbedNamePrefix + index];
+      }
+      else if(document.embeds[index - 1])
+      {
+        return document.embeds[index - 1];
+      }
+
+      dbg("Couldn't get the embed element that we use to send and recieve messages. Using Index:", index);
+      shutdownPolling();
+
+      return null;
+    }
+
+    function getMessengerMessages(message)
+    {
+      var messages = new Array(0);
+
+      var pLoc = messengerSrc.indexOf(messageResultPrefix);
+
+      if(message)
+      {
+        var _messages = message.split("&");
+
+        for(var i = 0; i < _messages.length; i++)
+        {
+          if(_messages[i])
+          {
+            var message = unescape(_messages[i]);
+
+            var push_me = new Array(unescape(message.substring(0, message.indexOf("="))), unescape(message.substring(message.indexOf("=") + 1)));
+
+            // For the old boxes.
+            if(!messages.push)
+            {
+              var _messages = new Array(messages.length + 1);
+
+              for(var i = 0; i < messages.length; i++)
+              {
+                messages[i] = messages[i];
+              }
+
+              _messages[i] = push_me;
+
+              messages = _messages;
+            }
+            else
+            {
+              messages.push(push_me);
+            }
+          }
+        }
+      }
+
+      return messages;
+    }
+
+    function Logout(callback, priority)
+    {
+      SendMessage("logout", true, callback, priority);
+    }
+
+    function Heartbeat(callback, priority)
+    {
+      SendMessage("heartBeat", true, callback, priority);
+    }
+
+    function GetPeers(callback, priority)
+    {
+      if(callback)
+      {
+        SendMessage("getPeers", true, callback, priority);
+      }
+    }
+
+    function SetSessionCompanion(sessionId, callback, priority)
+    {
+      if(sessionId)
+      {
+        SendMessage("setCompanion", sessionId, callback, priority);
+      }
+    }
+
+    function SetSessionName(name, callback, priority)
+    {
+      if(name)
+      {
+        SendMessage("setName", name, callback, priority);
+      }
+    }
+    
+    function SendMessage(name, value, callback, priority)
+    {
+      if(name)
+      {
+        var push_me = new Array(name, value, callback, priority);
+
+        // For the old boxes.
+        if(!messageQueue.push)
+        {
+          var _messageQueue = new Array(messageQueue.length + 1);
+
+          for(var i = 0; i < messageQueue.length; i++)
+          {
+            _messageQueue[i] = messageQueue[i];
+          }
+
+          _messageQueue[i] = push_me;
+
+          messageQueue = _messageQueue;
+        }
+        else
+        {
+          messageQueue.push(push_me);
+        }
+
+        if(priority)
+        {
+          clearSpacingInterval();
+
+          if(!requestCheckIntervalEnabled)
+          {
+            doMessenger();
+          }
+        }
+      }
+    }
+
+    function checkMessages(message, callback)
+    {
+      var messages = getMessengerMessages(message);
+
+      if(messages && messages.length > 0)
+      {
+        if(callback)
+        {
+          callback(messages);
+        }
+        else if(messengerDefaultCallback)
+        {
+          for(var i = 0; i < messages.length; i++)
+          {
+            messengerDefaultCallback(messages[i][0], messages[i][1]);
+          }
+        }
+      }
+    }
+
+    function doRequestFinal(message, session_id)
+    {
+      var messenger = getMessenger();
+
+      if(messenger)
+      {
+        if(session_id)
+        {
+          currentSessionid = session_id;
+        }
+
+        checkMessages(message, currentCallback);
+
+        currentCallback = null;
+
+        clearRequestIntervals();
+        if(isNextpriority())
+        {
+          doMessenger();
+        }
+        else
+        {
+          startSpacingInterval();
+        }
+      }
+    }
+
+    function doRequestCheck()
+    {
+      if(requestCheckIntervalEnabled)
+      {
+        var recheck = false;
+        var messenger = getMessenger();
+
+        if(messenger)
+        {
+          requestCheckTries++;
+
+          if(requestCheckTries >= requestCheckTriesBeforeRetry)
+          {
+            requestCheckTries = 0;
+            messenger.location.reload();
+          }
+        }
+      }
+    }
+
+    var cool = 0;
+    function doSpacingInterval()
+    {
+      if(requestSpacingIntervalEnabled)
+      {
+        doMessenger();
+      }
+    }
+
+    function doMessenger()
+    {
+      clearRequestIntervals();
+      pollMessenger();
+    }
+
+    function pollMessenger(index)
+    {
+      silenceDbg();
+      var messenger = getMessenger(index);
+      resetDbg();
+
+      if(messenger)
+      {
+        messenger.src = newEmbedURL();
+        startRequestCheckInterval();
+      }
+      else
+      {
+        dbg("Messenger couldn't fine messenger embed. JavaScript error?");
+        shutdownPolling();
+      }
+    }
+
+    function isNextpriority()
+    {
+      for(var i = 0; i < messageQueue.length; i++)
+      {
+        if(messageQueue[3])
+        {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    function newEmbedURL()
+    {
+      var _messengerEndpoint = messengerActiveEndpoint;
+
+      if(_messengerEndpoint.indexOf("?") == -1)
+      {
+        _messengerEndpoint += "?";
+      }
+      else
+      {
+        _messengerEndpoint += "&";
+      }
+
+      if(messageQueue.length > 0)
+      {
+        var takeThis = -1;
+        for(var i = 0; i < messageQueue.length; i++)
+        {
+          if(messageQueue[i] && messageQueue[i][3])
+          {
+            takeThis = i;
+            break;
+          }
+          else if(takeThis == -1 && messageQueue[i])
+          {
+            takeThis = i;
+          }
+
+          if(takeThis == -1)
+          {
+            takeThis = 0;
+          }
+        }
+
+        var message = messageQueue[takeThis];
+        
+        // For the old boxes.
+        if(!messageQueue.splice)
+        {
+          var count = 0;
+          for(var i = 0; i < messageQueue.length; i++)
+          {
+            if(messageQueue[i])
+            {
+              count++;
+            }
+          }
+
+          if(count > 0)
+          {
+            var _messageQueue = new Array(count - 1);
+
+            for(var i = 0, ii = 0; i < count; i++)
+            {
+              if(i != takeThis)
+              {
+                _messageQueue[ii] = messageQueue[i];
+                ii++;
+              }
+            }
+
+            messageQueue = _messageQueue;
+          }
+          else
+          {
+            messageQueue = new Array(0);
+          }
+        }
+        else
+        {
+          messageQueue = messageQueue.splice(takeThis, 1);
+        }
+
+        if(message)
+        {
+          var name = message[0].toString();
+          var value = message[1].toString();
+
+          if(name == "logout")
+          {
+            _messengerEndpoint += "logout=" + escape(value) + "&";
+          }
+          else
+          {
+            _messengerEndpoint += "message=" + escape(escape(name) + "=" + escape(value)) + "&";
+          }
+
+          if(message[2])
+          {
+            currentCallback = message[2];
+          }
+        }
+      }
+
+      if(requestNoCookies)
+      {
+        _messengerEndpoint += "sessionId=" + escape(currentSessionid) + "&";
+      }
+
+      _messengerEndpoint += (++checkIndex);
+
+      return _messengerEndpoint;
+    }
+
+    function writeEmbed(index, message)
+    {
+      if(!index)
+      {
+        if(!messengerIndex)
+        {
+          index = 1;
+        }
+        else
+        {
+          index = messengerIndex;
+        }
+      }
+
+      document.write('<embed name="' + messenegrEmbedNamePrefix + index + '"></embed>');
+    }
+
+    function startRequestCheckInterval(hard)
+    {
+      if(!requestCheckIntervalObj || hard)
+      {
+        clearRequestCheckInterval(true);
+        requestCheckIntervalObj = setInterval(doRequestCheck, requestCheckIntervalMsecs);
+      }
+      requestCheckIntervalEnabled = true;
+    }
+
+    function clearRequestCheckInterval(hard)
+    {
+      if(hard)
+      {
+        requestCheckTries =  0;
+        if(requestCheckIntervalObj)
+        {
+          clearInterval(requestCheckIntervalObj);
+        }
+        requestCheckIntervalObj = null;
+      }
+      requestCheckIntervalEnabled = false;
+    }
+
+    function startSpacingInterval(hard)
+    {
+      if(!requestSpacingIntervaObj || hard)
+      {
+        clearSpacingInterval(true);
+        requestSpacingIntervaObj = setInterval(doSpacingInterval, requestSpacingMsecs);
+      }
+      requestSpacingIntervalEnabled = true;
+    }
+
+    function clearSpacingInterval(hard)
+    {
+      if(hard)
+      {
+        if(requestSpacingIntervaObj)
+        {
+          clearInterval(requestSpacingIntervaObj);
+        }
+        requestSpacingIntervaObj = null;
+      }
+      requestSpacingIntervalEnabled = false;
+    }
+
+    function clearRequestIntervals(hard)
+    {
+      clearRequestCheckInterval(hard);
+      clearSpacingInterval(hard);
+    }
+
+    function startupMessenger()
+    {
+      startSpacingInterval(true);
+    }
+
+    function shutdownMessenger()
+    {
+      clearRequestIntervals(true)
+    }
+
+    function initm() // use this for onload
+    {
+      startupMessenger();
+      requestSpacingIntervalEnabled = false;
+    }
+
+    writeEmbed();
+</script>
+<SCRIPT LANGUAGE="JavaScript">
+var x = "x.jpg";
+// Location of where you uploaded your site's x.jpg image
+
+var o = "o.jpg";
+// Location of where you uploaded your site's o.jpg image
+
+var blank = "blank.jpg";
+// Location of where you uploaded your site's blank.jpg image
+
+var mode = 0;
+var ready = 1;
+var side = 1;
+var isMyTurn = 1;
+var mySide = -1;
+var pause = 0;
+var all = 0;
+var a = 0;
+var b = 0;
+var c = 0;
+var d = 0;
+var e = 0;
+var f = 0;
+var g = 0;
+var h = 0;
+var i = 0;
+var temp="";
+var ok = 0;
+var cf = 0;
+var _choice=9;
+var aRandomNumber = 0;
+var comp = 0;
+var t = 0;
+var wn = 0;
+var ls = 0;
+var ts = 0;
+var playerName = "";
+
+function webtvalert(message)
+{
+  location.href="Client:ShowAlert?message=" + escape(message);
+}
+
+function help() {
+  var path = document.URL.substring(0, document.URL.length - "index.html".length);
+
+  PlaySound(document.fart);
+  webtvalert("Welcome to <b>Tic-Tac-Toe</b>!  You can play against the computer, a remote player or a local player. The computer always plays as '<font color='red'>O</font>'.  Select the square you want by clicking the white box in the grid.  You cannot occupy a square that is already occupied. The first player to get three squares in a row wins.  Good Luck!! <img src='" + path + "butt.jpg' width='16' height='16'>");
+}
+
+function logicOne() {
+
+if ((a==1)&&(b==1)&&(c==1)) all=1;
+if ((a==1)&&(d==1)&&(g==1)) all=1;
+if ((a==1)&&(e==1)&&(i==1)) all=1;
+if ((b==1)&&(e==1)&&(h==1)) all=1;
+if ((d==1)&&(e==1)&&(f==1)) all=1;
+if ((g==1)&&(h==1)&&(i==1)) all=1;
+if ((c==1)&&(f==1)&&(i==1)) all=1;
+if ((g==1)&&(e==1)&&(c==1)) all=1;
+
+if ((a==2)&&(b==2)&&(c==2)) all=2;
+if ((a==2)&&(d==2)&&(g==2)) all=2;
+if ((a==2)&&(e==2)&&(i==2)) all=2;
+if ((b==2)&&(e==2)&&(h==2)) all=2;
+if ((d==2)&&(e==2)&&(f==2)) all=2;
+if ((g==2)&&(h==2)&&(i==2)) all=2;
+if ((c==2)&&(f==2)&&(i==2)) all=2;
+if ((g==2)&&(e==2)&&(c==2)) all=2;
+
+if ((a != 0)&&(b != 0)&&(c != 0)&&(d != 0)&&(e != 0)&&(f != 0)&&(g != 0)&&(h != 0)&&(i != 0)&&(all == 0)) all = 3;
+
+}
+
+function logicTwo() {
+if ((a==2)&&(b==2)&&(c== 0)&&(temp=="")) temp="C";
+if ((a==2)&&(b== 0)&&(c==2)&&(temp=="")) temp="B";
+if ((a== 0)&&(b==2)&&(c==2)&&(temp=="")) temp="A";
+if ((a==2)&&(d==2)&&(g== 0)&&(temp=="")) temp="G";
+if ((a==2)&&(d== 0)&&(g==2)&&(temp=="")) temp="D";
+if ((a== 0)&&(d==2)&&(g==2)&&(temp=="")) temp="A";
+if ((a==2)&&(e==2)&&(i== 0)&&(temp=="")) temp="I";
+if ((a==2)&&(e== 0)&&(i==2)&&(temp=="")) temp="E";
+if ((a== 0)&&(e==2)&&(i==2)&&(temp=="")) temp="A";
+if ((b==2)&&(e==2)&&(h== 0)&&(temp=="")) temp="H";
+if ((b==2)&&(e== 0)&&(h==2)&&(temp=="")) temp="E";
+if ((b== 0)&&(e==2)&&(h==2)&&(temp=="")) temp="B";
+if ((d==2)&&(e==2)&&(f== 0)&&(temp=="")) temp="F";
+if ((d==2)&&(e== 0)&&(f==2)&&(temp=="")) temp="E";
+if ((d== 0)&&(e==2)&&(f==2)&&(temp=="")) temp="D";
+if ((g==2)&&(h==2)&&(i== 0)&&(temp=="")) temp="I";
+if ((g==2)&&(h== 0)&&(i==2)&&(temp=="")) temp="H";
+if ((g== 0)&&(h==2)&&(i==2)&&(temp=="")) temp="G";
+if ((c==2)&&(f==2)&&(i== 0)&&(temp=="")) temp="I";
+if ((c==2)&&(f== 0)&&(i==2)&&(temp=="")) temp="F";
+if ((c== 0)&&(f==2)&&(i==2)&&(temp=="")) temp="C";
+if ((g==2)&&(e==2)&&(c== 0)&&(temp=="")) temp="C";
+if ((g==2)&&(e== 0)&&(c==2)&&(temp=="")) temp="E";
+if ((g== 0)&&(e==2)&&(c==2)&&(temp=="")) temp="G";
+}
+
+function logicThree() {
+if ((a==1)&&(b==1)&&(c==0)&&(temp=="")) temp="C";
+if ((a==1)&&(b==0)&&(c==1)&&(temp=="")) temp="B";
+if ((a==0)&&(b==1)&&(c==1)&&(temp=="")) temp="A";
+if ((a==1)&&(d==1)&&(g==0)&&(temp=="")) temp="G";
+if ((a==1)&&(d==0)&&(g==1)&&(temp=="")) temp="D";
+if ((a==0)&&(d==1)&&(g==1)&&(temp=="")) temp="A";
+if ((a==1)&&(e==1)&&(i==0)&&(temp=="")) temp="I";
+if ((a==1)&&(e==0)&&(i==1)&&(temp=="")) temp="E";
+if ((a==0)&&(e==1)&&(i==1)&&(temp=="")) temp="A";
+if ((b==1)&&(e==1)&&(h==0)&&(temp=="")) temp="H";
+if ((b==1)&&(e==0)&&(h==1)&&(temp=="")) temp="E";
+if ((b==0)&&(e==1)&&(h==1)&&(temp=="")) temp="B";
+if ((d==1)&&(e==1)&&(f==0)&&(temp=="")) temp="F";
+if ((d==1)&&(e==0)&&(f==1)&&(temp=="")) temp="E";
+if ((d==0)&&(e==1)&&(f==1)&&(temp=="")) temp="D";
+if ((g==1)&&(h==1)&&(i==0)&&(temp=="")) temp="I";
+if ((g==1)&&(h==0)&&(i==1)&&(temp=="")) temp="H";
+if ((g==0)&&(h==1)&&(i==1)&&(temp=="")) temp="G";
+if ((c==1)&&(f==1)&&(i==0)&&(temp=="")) temp="I";
+if ((c==1)&&(f==0)&&(i==1)&&(temp=="")) temp="F";
+if ((c==0)&&(f==1)&&(i==1)&&(temp=="")) temp="C";
+if ((g==1)&&(e==1)&&(c==0)&&(temp=="")) temp="C";
+if ((g==1)&&(e==0)&&(c==1)&&(temp=="")) temp="E";
+if ((g==0)&&(e==1)&&(c==1)&&(temp=="")) temp="G";
+}
+
+function clearOut() {
+document.game.xs.value="0";
+document.game.os.value="0";
+document.game.ties.value="0";
+}
+function checkSpace() {
+if ((temp=="A")&&(a==0)) {
+ok=1;
+if (cf==0) a=1;
+if (cf==1) a=2;
+}
+if ((temp=="B")&&(b==0)) {
+ok=1;
+if (cf==0) b=1;
+if (cf==1) b=2;
+}
+if ((temp=="C")&&(c==0)) {
+ok=1;
+if (cf==0) c=1;
+if (cf==1) c=2;
+}
+if ((temp=="D")&&(d==0)) {
+ok=1;
+if (cf==0) d=1;
+if (cf==1) d=2;
+}
+if ((temp=="E")&&(e==0)) {
+ok=1;
+if (cf==0) e=1;
+if (cf==1) e=2;
+}
+if ((temp=="F")&&(f==0)) {
+ok=1
+if (cf==0) f=1;
+if (cf==1) f=2;
+}
+if ((temp=="G")&&(g==0)) {
+ok=1
+if (cf==0) g=1;
+if (cf==1) g=2;
+}
+if ((temp=="H")&&(h==0)) {
+ok=1;
+if (cf==0) h=1;
+if (cf==1) h=2;
+}
+if ((temp=="I")&&(i==0)) {
+ok=1;
+if (cf==0) i=1;
+if (cf==1) i=2;
+}
+}
+
+
+function choice(chName, remote) {
+  if(!ready || (!isMyTurn && !remote))
+  {
+    return;
+  }
+
+  hasPlayed = true;
+  pause = 0;
+  
+  if (all!=0) ended();
+
+  if (all==0) {
+    cf = (mode == 0 || side == 1) ? 0 : 1;
+    ok = 0;
+    temp=chName;
+    checkSpace();
+
+    if (ok==1) {
+      if(mode > 0 && side == 0)
+      {
+        document.images[chName].src = o;
+      }
+      else
+      {
+        document.images[chName].src = x;
+      }
+    }
+
+    if (ok==0)taken();
+
+    if(mode == 1 && isMyTurn) {
+        SendMessage("boardMove", chName);
+    }
+
+    if(!process()) {
+      if(mode==0) {
+        if ((all==0)&&(pause==0)) computerChoice();
+      } else {
+        side = (side == 1) ? 0 : 1;
+
+        if(mode == 1) {
+          doGameTurn(!isMyTurn);
+        } else {
+          if(side == 0) {
+            document.message.alert.value="O select your square!";
+          } else {
+            document.message.alert.value="X select your square!";
+          }
+        }
+      }
+    }
+  }
+}
+
+
+function taken() {
+alert("That square is already occupied.  Please select another square.")
+pause=1;
+}
+
+function computerChoice() {
+temp="";
+ok = 0;
+cf=1;
+logicTwo();
+logicThree();
+checkSpace();
+while(ok==0) {
+aRandomNumber=Math.random()
+comp=Math.round((_choice-1)*aRandomNumber)+1;
+if (comp==1) temp="A";
+if (comp==2) temp="B";
+if (comp==3) temp="C";
+if (comp==4) temp="D";
+if (comp==5) temp="E";
+if (comp==6) temp="F";
+if (comp==7) temp="G";
+if (comp==8) temp="H";
+if (comp==9) temp="I";
+checkSpace();
+}
+
+document.images[temp].src= o;
+
+process();
+}
+
+function ended() {
+PlaySound(document.tie); document.message.alert.value="The game has ended."
+}
+function PlaySound(sound) {
+if (sound == null) {  
+return;
+} else {
+sound.play(false);
+}
+}
+
+function process() {
+logicOne();
+if (all==1){ 
+  if(mode == 0) {
+    document.message.alert.value="You won, congratulations!";
+    PlaySound(document.win);
+  } else if (mode == 1) {
+    if(mySide == 1) {
+      document.message.alert.value="You won, congratulations!";
+      PlaySound(document.win);
+    } else {
+      document.message.alert.value="Loser!";
+      PlaySound(document.lose);
+    }
+  } else {
+    document.message.alert.value="X's won!";
+    PlaySound(document.win);
+  }
+
+  wn++;
+}
+if (all==2){ 
+  
+  if(mode == 0) {
+    document.message.alert.value="Gotcha!  I win!";
+    PlaySound(document.lose);
+  } else if (mode == 1) {
+    if(mySide == 0) {
+      document.message.alert.value="You won!";
+      PlaySound(document.win);
+    } else {
+      document.message.alert.value="Loser!";
+      PlaySound(document.lose);
+    }
+  } else {
+    document.message.alert.value="O's won!";
+    PlaySound(document.win);
+  }
+
+  ls++; 
+}
+if (all==3){ 
+
+  if(mode == 0) {
+    document.message.alert.value="We Tied"; 
+    PlaySound(document.tie);
+  } else {
+    document.message.alert.value="Tied!";
+  }
+
+  ts++; 
+}
+
+
+if (all!=0) 
+{
+document.game.xs.value = wn;
+document.game.os.value = ls;
+document.game.ties.value = ts;
+
+
+return true;
+} else {
+  return false;
+}
+
+
+}
+
+function playAgainC() {
+  if(playAgain()) {
+    mode = 0;
+    ready = 1;
+    isMyTurn = 1;
+    document.message.alert.value="Select your square!";
+    document.title.titletxt.value="You vs Computer";
+    
+  }
+}
+
+function sessionIdNum(session_id)
+{
+  var num = 0;
+
+  for(var i = 0; i < session_id.length; i++)
+  {
+    num += session_id.charCodeAt(i);
+  }
+
+  return num;
+}
+
+// Simple selection but would be cool to have more complex selection like rotating sides.
+function selectFirst(session_id1, session_id2) {
+  if(sessionIdNum(session_id1) > sessionIdNum(session_id2))
+  {
+    return session_id1;
+  }
+  else
+  {
+    return session_id2;
+  }
+}
+
+function setRemoteOpponentName(name) {
+  document.title.titletxt.value="You vs " + name;
+}
+
+function doGameTurn(isLocalTurn)
+{
+  ready = 1;
+
+  if(isLocalTurn)
+  {
+    isMyTurn = 1;
+    side = mySide;
+    document.message.alert.value="Choose your square! [" + ((side) ? "X" : "O") + "]";
+  }
+  else
+  {
+    isMyTurn = 0;
+    side = (mySide) ? 0 : 1;
+    document.message.alert.value="Other player's turn [" + ((side) ? "X" : "O") + "]";
+  }
+}
+
+function processMessage(name, value) {
+  if(name == "setCompanion") {
+  } else if(name == "setName") {
+    setRemoteOpponentName(value);
+  } else if(name == "okGame") {
+    var name = unescape(value.substring(0, value.indexOf("=")));
+    var session_id = unescape(value.substring(value.indexOf("=") + 1));
+
+    isLocalTurn = (currentSessionid == selectFirst(currentSessionid, session_id));
+    mySide = (isLocalTurn) ? 1 : 0;
+    doGameTurn(isLocalTurn);
+  } else if(name == "restartGame") {
+    var name = unescape(value.substring(0, value.indexOf("=")));
+    var session_id = unescape(value.substring(value.indexOf("=") + 1));
+
+    setRemoteOpponentName(name);
+
+    reset();
+    mode = 1;
+    ready = 0;
+    isMyTurn = 0;
+
+    isLocalTurn = (currentSessionid == selectFirst(currentSessionid, session_id));
+    mySide = (isLocalTurn) ? 1 : 0;
+    doGameTurn(isLocalTurn);
+
+    SendMessage("okGame", "", null, true);
+  } else if(name == "boardMove") {
+    choice(value, true);
+  }
+}
+
+function selectPeer(peers) {
+  if(peers.length == 0) {
+    GetPeers(selectPeer);
+  } else {
+    var rand_side = ((Math.random() * 1000) > 500) ? 1 : 0;
+
+    var rand_peer_index = Math.min(Math.max(Math.round(Math.random() * peers.length) - 1, 0), (peers.length - 1));
+
+    var name = peers[rand_peer_index][0];
+    var session_id = peers[rand_peer_index][1];
+
+    setRemoteOpponentName(name);
+    SetSessionCompanion(session_id, true);
+  }
+}
+
+function setupRemoteName() {
+  if(!playerName) {
+    if(navigator.userAgent != "Mozilla/3.0 WebTV/2.3 (Compatible; MSIE 2.0)" && window.prompt) { // Viewer 1.0 has problems.
+      playerName = window.prompt("Enter your player name!");
+      if(playerName == null) {
+        return null;
+      } else {
+        return setupRemoteName();
+      }
+    } else {
+      return "Player" + Math.round(Math.random() * 1000);
+    }
+  }
+
+  return playerName;
+}
+
+function scrubPlayerName(playerName) {
+  var scrubbedPlayerName = "";
+
+  for(var i = 0; i < playerName.length; i++)
+  {
+    code = playerName.charCodeAt(i);
+
+    if(!(code > 47 && code < 58) && !(code > 64 && code < 91) && !(code > 96 && code < 123)) {
+        scrubbedPlayerName += ".";
+    } else {
+      scrubbedPlayerName += playerName.charAt(i);
+    }
+  }
+
+  return scrubbedPlayerName;
+}
+
+function setupRemote() {
+  playerName = scrubPlayerName(setupRemoteName());
+
+  if(playerName != null) {
+    startSpacingInterval();
+    
+    return true;
+  } else {
+    return false;
+  }
+}
+
+function playAgainR() {
+  if(playAgain() && setupRemote()) {
+    SetSessionName(playerName, null, true);
+    GetPeers(selectPeer, true);
+    SendMessage("restartGame", "", null, true);
+
+    mode = 1;
+    ready = 0;
+    isMyTurn = 0;
+    mySide = -1;
+    document.message.alert.value="Waiting for connection...";
+    document.title.titletxt.value="You vs ?";
+  }
+}
+
+function playAgainL() {
+  if(playAgain()) {
+    mode = 2;
+    ready = 1;
+    isMyTurn = 1;
+    side = 1;
+    document.message.alert.value="X select your square!";
+    document.title.titletxt.value="Local! X vs O";
+    //playAgain();
+  }
+}
+
+
+function playAgain() {
+  clearRequestIntervals();
+
+  if (all==0) {
+    if(confirm("This will restart the game and clear all the current scores. OK?")) return reset();
+    //location.reload();
+  }
+  if (all>0) return reset();
+
+  return false;
+}
+
+
+function reset() {
+all = 0;
+ready = 1;
+side = 1;
+a = 0;
+b = 0;
+c = 0;
+d = 0;
+e = 0;
+f = 0;
+g = 0;
+h = 0;
+i = 0;
+temp="";
+ok = 0;
+cf = 0;
+t = 0;//
+_choice=9;
+aRandomNumber = 0;
+comp = 0;
+document.images.A.src= blank;
+document.images.B.src= blank;
+document.images.C.src= blank;
+document.images.D.src= blank;
+document.images.E.src= blank;
+document.images.F.src= blank;
+document.images.G.src= blank;
+document.images.H.src= blank;
+document.images.I.src= blank;
+document.message.alert.value="";
+
+
+//if (t==0) { t=2; myChoice(); }
+//t--;
+return true;
+}
+</script>
+  <body bgcolor="#4c5a67" background="file://disk/browser/games/Pattern_Games.gif" text="#cbcbcb" alink="#dddddd" vlink="#dddddd" link="#dddddd" hspace="0" vspace="0" onload="initm">
+  <embed src="win.mp3" hidden="TRUE" controls="console" volume="100" loop="FALSE" autostart="FALSE" name="win" mastersound>
+  <embed src="lose.mp3" hidden="TRUE" controls="console" volume="100" loop="FALSE" autostart="FALSE" name="lose" mastersound>
+  <embed src="tie.mp3" hidden="TRUE" controls="console" volume="100" loop="FALSE" autostart="FALSE" name="tie" mastersound>
+  <embed src="fart.mp3" hidden="TRUE" controls="console" volume="100" loop="FALSE" autostart="FALSE" name="fart" mastersound>
+  <table cellspacing="0" cellpadding="0" cellborder="0">
+      <tr>
+        <td background="file://disk/browser/games/GamesShadowLogo3.jpg" width="104" height="80" valign="top" align="left">
+          <spacer type="block" WIDTH="11" HEIGHT="11"><br>
+            <spacer type="block" WIDTH="10" HEIGHT="1"> <a href="file://disk/browser/games/games.html"><img src="hacktv4.gif" width="90" height="69"></a>
+        </td>
+        <td width="456" height="80" valign="top" align="center"><img src="file://disk/browser/games/GamesBanner.jpg" width="456" height="50"><br>
+          <img src="file://rom/tvimages/Shadow_Horizontal.gif" width="456" height="6">
+        </td>
+      </tr>
+    </table>
+    <table cellspacing="0" cellpadding="0">
+      <tr>
+        <td colspan="2"></td>
+        <td valign="top" align="center">
+          <form name=title>
+            <font color="#cbcbcb" size="1"><shadow><input type=text text=#cbcbcb id=titletxt name=titletxt border="0" value="" bgcolor=#4c5a67 usestyle nohighlight noselect></shadow></font>
+          </form>
+        </td>
+      </tr>
+      <tr>
+        <td abswidth="45">&nbsp;</td>
+        <td>
+          <table>
+            <br>
+            <td abswidth="130">
+              <font size="1" color="#ffcf69">
+                <shadow><b>Tic-Tac-Toe</b></shadow>
+              </font><br><br>
+            </td>
+            <tr>
+              <td width="168" valign="top" align="left">
+                <font size="1" color="#989898">
+                  <li><a href="javascript:" onClick="playAgainC();return false;">New vs Computer</a><br>
+                  <li><a href="javascript:" onClick="playAgainR();return false;">New vs Remote</a><br>
+                  <li><a href="javascript:" onClick="playAgainL();return false;">New vs Local</a><br><br>
+                  <li><a href="javascript:" onClick="help();return false;">Game Help</a><br><br>
+            <tr>
+              <td>
+                <font size="1" color="#ffcf69">
+                  <shadow><b>Scores:</b></shadow>
+                </font><br><br>
+              </td>
+              <form name=game>
+            <tr>
+              <td>
+                <font size="1" color="#ffcf69">
+                  <shadow>X's: </shadow><input type=text size=3 value=0 text=#dddddd name=xs border="0" bgcolor=#4c5a67 nohighlight noselect>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <font size="1" color="#ffcf69">
+                  <shadow>O's: </shadow><input type=text value=0 size=3 text=#dddddd name=os border="0" bgcolor=#4c5a67 nohighlight noselect>
+              </td>
+            <tr>
+              <td>
+                <font size="1" color="#ffcf69">
+                  <shadow>Ties: </shadow><input type=text value=0 size=3 text=#dddddd name=ties border="0" bgcolor=#4c5a67 nohighlight noselect>
+              </td>
+            </tr>
+            </form>
+            <spacer H=16 type=vertical>
+              <tr>
+                <td width="130" valign="top" align="left">
+                  <spacer H=12 type=vertical>
+                    <FORM action="client:goback">
+                      <FONT COLOR="#E7CE4A" SIZE=-1>
+                        <SHADOW>
+                          <INPUT TYPE=SUBMIT BORDERIMAGE="file://ROM/tvimages/TVButtonBorder.bif" VALUE="Done" USESTYLE WIDTH=128>
+                        </SHADOW>
+                      </FONT>
+                    </FORM>
+                </td>
+              </tr>
+          </table>
+        </td>
+        <td valign="top">
+          <table>
+            <td valign="top">
+              <table border=0>
+                <td>
+                  <table border=1>
+                    <font size="1" color="#ffcf69">
+                    <form name=message>
+                      <input type=text size=26 text=#ffcf69 id=alert name=alert border="0" value="" bgcolor=#4c5a67 nohighlight noselect>
+                    </form>
+                    <tr>
+                      <td><a href="javascript:choice('A', false)"><img src="blank.jpg" border=0 height=88 width=88 name=A alt="Top-Left"></a></td>
+                      <td><a href="javascript:choice('B', false)"><img src="blank.jpg" border=0 height=88 width=88 name=B alt="Top-Center"></a></td>
+                      <td><a href="javascript:choice('C', false)"><img src="blank.jpg" border=0 height=88 width=88 name=C alt="Top-Right"></a></td>
+                    </tr>
+                    <tr>
+                      <td><a href="javascript:choice('D', false)"><img src="blank.jpg" border=0 height=88 width=88 name=D alt="Middle-Left"></a></td>
+                      <td><a href="javascript:choice('E', false)"><img src="blank.jpg" border=0 height=88 width=88 name=E alt="Middle-Center"></a></td>
+                      <td><a href="javascript:choice('F', false)"><img src="blank.jpg" border=0 height=88 width=88 name=F alt="Middle-Right"></a></td>
+                    </tr>
+                    <tr>
+                      <td><a href="javascript:choice('G', false)"><img src="blank.jpg" border=0 height=88 width=88 name=G alt="Bottom-Left"></a></td>
+                      <td><a href="javascript:choice('H', false)"><img src="blank.jpg" border=0 height=88 width=88 name=H alt="Bottom-Center"></a></td>
+                      <td><a href="javascript:choice('I', false)"><img src="blank.jpg" border=0 height=88 width=88 name=I alt="Bottom-Right"></a></td>
+                    </tr>
+                  </table>
+                </td>
+              </table>
+            </td>
+      </tr>
+    </table>
+  </body>
+</html>
